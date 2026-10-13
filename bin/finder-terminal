@@ -1,0 +1,532 @@
+#!/bin/zsh
+# finder-terminal — a Dolphin-style (F4) terminal panel for macOS Finder + Ghostty.
+#
+#   finder-terminal toggle [folder]   open the panel, or close it if it is open
+#   finder-terminal open   [folder]   open (or focus) the panel
+#   finder-terminal close             close the panel and restore Finder
+#   finder-terminal status            print state
+#   finder-terminal watch  <win-id>   (internal) Finder -> ~/.finder-follow poller
+#
+# Dependency-free: zsh + osascript (AppleScript / JXA). See README.md.
+
+emulate -L zsh
+setopt no_unset pipe_fail extended_glob
+zmodload zsh/datetime zsh/mathfunc
+
+typeset -g SELF=${${(%):-%x}:A}
+typeset -g STATE_DIR=${FINDER_TERMINAL_STATE:-$HOME/.local/state/finder-terminal}
+typeset -g FOLLOW_FILE=${FINDER_FOLLOW_FILE:-$HOME/.finder-follow}
+typeset -g GHOSTTY_APP=${FINDER_TERMINAL_GHOSTTY:-/Applications/Ghostty.app}
+[[ -d $GHOSTTY_APP ]] || [[ ! -d $HOME/Applications/Ghostty.app ]] || GHOSTTY_APP=$HOME/Applications/Ghostty.app
+typeset -gF SPLIT=${FINDER_TERMINAL_SPLIT:-0.6}     # Finder's share of the screen height
+typeset -gF POLL=${FINDER_TERMINAL_POLL:-0.5}       # watcher period, seconds
+typeset -g FLOAT=${FINDER_TERMINAL_FLOAT:-auto}      # auto|on|off: float the panel above Stage Manager
+typeset -g LOG=$STATE_DIR/log
+typeset -g PID_FILE=$STATE_DIR/watcher.pid
+typeset -g GID_FILE=$STATE_DIR/ghostty-window        # Ghostty window id
+typeset -g FWIN_FILE=$STATE_DIR/finder-window        # "<finder window id> x1 y1 x2 y2"
+typeset -g FLOAT_FILE=$STATE_DIR/floating            # present while the panel is float-on-top
+
+mkdir -p "$STATE_DIR"
+
+# ---------------------------------------------------------------- helpers
+
+log() {
+  local line="$(strftime '%Y-%m-%d %H:%M:%S' $EPOCHSECONDS) [$$] $*"
+  print -r -- "$line" >> "$LOG" 2>/dev/null
+  if [[ -t 2 ]]; then print -r -- "finder-terminal: $*" >&2; fi
+}
+
+die() { log "ERROR: $*"; exit 1 }
+
+# osa SCRIPT [ARGS...] — run an AppleScript from a string; args reach `on run argv`.
+osa()  { local s=$1; shift; osascript - "$@" <<< "$s" }
+# jxa SCRIPT [ARGS...] — same, JavaScript for Automation.
+jxa()  { local s=$1; shift; osascript -l JavaScript - "$@" <<< "$s" }
+
+# normalize_path — strip trailing slash (keep "/"), print nothing for empty.
+normalize_path() {
+  local p=$1
+  p=${p%%/##}
+  [[ -z $p && $1 == /* ]] && p=/
+  print -r -- "$p"
+}
+
+write_follow() {
+  # atomic: the shell never sees a half-written path
+  print -r -- "$1" > "$FOLLOW_FILE.tmp" && mv -f "$FOLLOW_FILE.tmp" "$FOLLOW_FILE"
+}
+
+# ---------------------------------------------------------------- Finder
+
+# POSIX path of the front Finder window's folder (= the active tab), or "".
+# Windows with no real folder (Recents, search results, AirDrop, ...) yield "".
+finder_front_path() {
+  local p
+  p=$(osa 'on run argv
+  try
+    tell application "Finder" to return POSIX path of ((target of front Finder window) as alias)
+  on error
+    return ""
+  end try
+end run' 2>/dev/null) || return 1
+  p=$(normalize_path "$p")
+  [[ -n $p && -d $p ]] || return 1
+  print -r -- "$p"
+}
+
+# Finder's "insertion location" (front window folder, else Desktop), or "".
+finder_insertion_path() {
+  local p
+  p=$(osa 'on run argv
+  try
+    tell application "Finder" to return POSIX path of (insertion location as alias)
+  on error
+    return ""
+  end try
+end run' 2>/dev/null) || return 1
+  p=$(normalize_path "$p")
+  [[ -n $p && -d $p ]] || return 1
+  print -r -- "$p"
+}
+
+# "id x1 y1 x2 y2" of the front Finder window, or "".
+finder_front_window() {
+  osa 'on run argv
+  try
+    tell application "Finder"
+      set w to front Finder window
+      set b to bounds of w
+      return (id of w as text) & " " & (item 1 of b) & " " & (item 2 of b) & " " & (item 3 of b) & " " & (item 4 of b)
+    end tell
+  on error
+    return ""
+  end try
+end run' 2>/dev/null
+}
+
+# Open a new Finder window at a folder and bring Finder forward.
+finder_new_window() {
+  osa 'on run argv
+  tell application "Finder"
+    set w to make new Finder window to (POSIX file (item 1 of argv) as alias)
+    activate
+    return id of w as text
+  end tell
+end run' "$1" 2>/dev/null
+}
+
+# finder_set_target ID PATH — navigate that window (tab) to a folder.
+finder_set_target() {
+  osa 'on run argv
+  tell application "Finder"
+    set target of Finder window id ((item 1 of argv) as integer) to (POSIX file (item 2 of argv) as alias)
+  end tell
+end run' "$@" >/dev/null 2>>"$LOG"
+}
+
+# finder_set_bounds ID X1 Y1 X2 Y2 — only if that window still exists.
+finder_set_bounds() {
+  osa 'on run argv
+  set wid to (item 1 of argv) as integer
+  set b to {(item 2 of argv) as integer, (item 3 of argv) as integer, (item 4 of argv) as integer, (item 5 of argv) as integer}
+  tell application "Finder"
+    if not (exists Finder window id wid) then return "missing"
+    set bounds of Finder window id wid to b
+    return "ok"
+  end tell
+end run' "$@" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- screens
+
+# screen_visible_frame CX CY -> "left top width height" (top-left origin, pixels)
+# of the display containing the point, excluding the menu bar and Dock.
+screen_visible_frame() {
+  jxa 'ObjC.import("AppKit");
+function run(argv) {
+  const cx = parseFloat(argv[0]), cy = parseFloat(argv[1]);
+  const screens = $.NSScreen.screens;
+  const n = screens.count;
+  const primaryH = screens.objectAtIndex(0).frame.size.height;
+  const flip = (r) => ({ left: r.origin.x, top: primaryH - (r.origin.y + r.size.height), width: r.size.width, height: r.size.height });
+  let pick = flip(screens.objectAtIndex(0).visibleFrame);
+  for (let i = 0; i < n; i++) {
+    const s = screens.objectAtIndex(i);
+    const f = flip(s.frame);
+    if (cx >= f.left && cx < f.left + f.width && cy >= f.top && cy < f.top + f.height) { pick = flip(s.visibleFrame); break; }
+  }
+  return [pick.left, pick.top, pick.width, pick.height].map(Math.round).join(" ");
+}' "$1" "$2" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- Ghostty
+
+ghostty_running() {
+  [[ $(osa 'application "Ghostty" is running' 2>/dev/null) == true ]]
+}
+
+# Launch Ghostty without its default initial window; wait until it is scriptable.
+ghostty_launch() {
+  [[ -d $GHOSTTY_APP ]] || die "Ghostty not found at $GHOSTTY_APP (set FINDER_TERMINAL_GHOSTTY)"
+  log "launching Ghostty"
+  open -a "$GHOSTTY_APP" --args --initial-window=false || die "open Ghostty failed"
+  local i
+  for i in {1..40}; do
+    ghostty_running && [[ $(osa 'tell application "Ghostty" to count windows' 2>/dev/null) == <-> ]] && return 0
+    sleep 0.25
+  done
+  die "Ghostty did not become scriptable"
+}
+
+# ghostty_new_window DIR [KEY=VALUE ...] -> window id
+ghostty_new_window() {
+  osa 'on run argv
+  tell application "Ghostty"
+    set cfg to new surface configuration
+    set initial working directory of cfg to (item 1 of argv)
+    set environment variables of cfg to (rest of argv)
+    set w to new window with configuration cfg
+    return id of w
+  end tell
+end run' "$@" 2>>"$LOG"
+}
+
+ghostty_window_exists() {
+  [[ $(osa 'on run argv
+  if application "Ghostty" is running then
+    tell application "Ghostty" to return exists (window id (item 1 of argv))
+  end if
+  return false
+end run' "$1" 2>/dev/null) == true ]]
+}
+
+ghostty_window_name() {
+  osa 'on run argv
+  if application "Ghostty" is running then
+    tell application "Ghostty"
+      if exists (window id (item 1 of argv)) then return name of (window id (item 1 of argv))
+    end tell
+  end if
+  return ""
+end run' "$1" 2>/dev/null
+}
+
+ghostty_close_window() {
+  osa 'on run argv
+  if application "Ghostty" is running then
+    tell application "Ghostty"
+      if exists (window id (item 1 of argv)) then close window (window id (item 1 of argv))
+    end tell
+  end if
+end run' "$1" 2>>"$LOG"
+}
+
+ghostty_activate_window() {
+  osa 'on run argv
+  if application "Ghostty" is running then
+    tell application "Ghostty"
+      if exists (window id (item 1 of argv)) then
+        activate window (window id (item 1 of argv))
+      else
+        activate
+      end if
+    end tell
+  end if
+end run' "$1" >/dev/null 2>>"$LOG"
+}
+
+# Stage Manager shows one app's windows at a time, parking the others in the strip.
+# A float-on-top window is not managed by it, so the panel stays docked under Finder
+# and clicking either window keeps both on stage.
+stage_manager_on() { [[ $(defaults read com.apple.WindowManager GloballyEnabled 2>/dev/null) == 1 ]] }
+want_float() {
+  case $FLOAT in
+    on) return 0 ;;
+    off) return 1 ;;
+    *) stage_manager_on ;;
+  esac
+}
+ghostty_toggle_float() {
+  osa 'on run argv
+  if application "Ghostty" is running then
+    tell application "Ghostty"
+      if exists (window id (item 1 of argv)) then
+        perform action "toggle_window_float_on_top" on (focused terminal of selected tab of (window id (item 1 of argv)))
+      end if
+    end tell
+  end if
+end run' "$1" >/dev/null 2>>"$LOG"
+}
+
+# Name of the frontmost application process ("Finder", "ghostty", ...).
+frontmost_app() {
+  osa 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null
+}
+
+# Accessibility: true if this process (really: the app responsible for it) may drive
+# System Events. With PROMPT=1 macOS shows the grant dialog and lists the app.
+ax_trusted() {
+  local prompt=${1:-0}
+  [[ $(jxa 'ObjC.import("ApplicationServices");
+function run(argv) {
+  if (argv[0] === "1") {
+    const opts = $.NSDictionary.dictionaryWithObjectForKey($.kCFBooleanTrue, $("AXTrustedCheckOptionPrompt"));
+    return String($.AXIsProcessTrustedWithOptions(opts));
+  }
+  return String($.AXIsProcessTrusted());
+}' "$prompt" 2>/dev/null) == true ]]
+}
+
+# tile_ghostty WIN-ID LEFT TOP WIDTH HEIGHT — place the window via System Events
+# (needs Accessibility). The new window is Ghostty's front window; when it has a
+# title we match on that instead of trusting z-order.
+tile_ghostty() {
+  local gid=$1 left=$2 top=$3 width=$4 height=$5 i out name
+  for i in {1..25}; do
+    name=$(ghostty_window_name "$gid")
+    out=$(osa 'on run argv
+  set {wname, l, t, w, h} to {item 1 of argv, (item 2 of argv) as integer, (item 3 of argv) as integer, (item 4 of argv) as integer, (item 5 of argv) as integer}
+  tell application "System Events"
+    tell process "Ghostty"
+      if (count of windows) is 0 then return "nowindow"
+      set win to window 1
+      if wname is not "" then
+        if exists (window wname) then set win to window wname
+      end if
+      set size of win to {w, h}
+      set position of win to {l, t}
+      set size of win to {w, h}
+      set p to position of win
+      set s to size of win
+      return ((item 1 of p) as text) & " " & ((item 2 of p) as text) & " " & ((item 1 of s) as text) & " " & ((item 2 of s) as text)
+    end tell
+  end tell
+end run' "$name" "$left" "$top" "$width" "$height" 2>&1) || true
+    case $out in
+      nowindow) ;;
+      *"not allowed assistive access"*|*"(-25211)"*|*"(-1719)"*)
+        log "cannot position Ghostty: Accessibility permission missing ($out)"; return 2 ;;
+      *"error"*) log "tile attempt $i: $out" ;;
+      *)
+        local -a got; got=(${=out})
+        if (( ${#got} == 4 )) && (( abs(got[1]-left) <= 4 && abs(got[2]-top) <= 4 && abs(got[3]-width) <= 40 && abs(got[4]-height) <= 40 )); then
+          log "Ghostty tiled at $out"; return 0
+        fi ;;
+    esac
+    sleep 0.15
+  done
+  log "could not verify Ghostty placement (last: ${out:-none})"; return 1
+}
+
+# ---------------------------------------------------------------- state
+
+watcher_pid() { [[ -r $PID_FILE ]] && print -r -- "$(<$PID_FILE)" }
+watcher_alive() { local p; p=$(watcher_pid) && [[ -n $p ]] && kill -0 "$p" 2>/dev/null }
+stop_watcher() {
+  local p; p=$(watcher_pid) || return 0
+  [[ -n $p && $p != $$ ]] && kill "$p" 2>/dev/null
+  rm -f "$PID_FILE"
+}
+
+saved_gid() { [[ -r $GID_FILE ]] && print -r -- "$(<$GID_FILE)" }
+panel_open() { local g; g=$(saved_gid) && [[ -n $g ]] && ghostty_window_exists "$g" }
+
+restore_finder() {
+  [[ -r $FWIN_FILE ]] || return 0
+  local -a f; f=(${=$(<$FWIN_FILE)})
+  if (( ${#f} == 5 )); then
+    log "restoring Finder window $f[1] to $f[2],$f[3],$f[4],$f[5]: $(finder_set_bounds "${f[@]}")"
+  fi
+  rm -f "$FWIN_FILE"
+}
+
+clear_state() { rm -f "$GID_FILE" "$FWIN_FILE" "$FLOAT_FILE" }
+
+# ---------------------------------------------------------------- commands
+
+do_open() {
+  local folder=${1:-}
+  [[ -n $folder && ! -d $folder ]] && folder=${folder:h}          # a file -> its folder
+  [[ -n $folder ]] && folder=$(normalize_path "${folder:A}")
+  [[ -n $folder && -d $folder ]] || folder=$(finder_front_path) || folder=$(finder_insertion_path) || folder=$HOME
+
+  if panel_open; then
+    log "panel already open; focusing"
+    ghostty_activate_window "$(saved_gid)"
+    return 0
+  fi
+  stop_watcher
+  restore_finder          # leftover from a crashed/failed run: put Finder back before measuring
+  clear_state
+
+  # Front Finder window (create one if Finder has none, e.g. toggled from the Desktop)
+  local -a fw; fw=(${=$(finder_front_window)})
+  if (( ${#fw} != 5 )); then
+    finder_new_window "$folder" >/dev/null; sleep 0.3
+    fw=(${=$(finder_front_window)})
+  fi
+  (( ${#fw} == 5 )) || die "no Finder window to attach to"
+  local fid=$fw[1] x1=$fw[2] y1=$fw[3] x2=$fw[4] y2=$fw[5]
+  print -r -- "$fid $x1 $y1 $x2 $y2" > "$FWIN_FILE"
+  log "Finder window $fid at $x1,$y1,$x2,$y2 folder=$folder"
+
+  # Keep Finder and the panel in step from the start: if the panel opens in a
+  # different folder (right-clicked subfolder, or a window without a real folder),
+  # navigate the Finder window there.
+  local cur; cur=$(finder_front_path) || cur=""
+  if [[ ${cur:A} != ${folder:A} ]]; then
+    finder_set_target "$fid" "$folder"
+    log "Finder window $fid navigated to $folder"
+  fi
+
+  # Display geometry (the display under the Finder window's centre)
+  local -a sf; sf=(${=$(screen_visible_frame $(( (x1 + x2) / 2 )) $(( (y1 + y2) / 2 )))})
+  (( ${#sf} == 4 )) || die "could not read screen geometry"
+  local left=$sf[1] top=$sf[2] width=$sf[3] height=$sf[4]
+  local fh=$(( int(height * SPLIT) ))
+  local th=$(( height - fh ))
+
+  write_follow "$folder"
+
+  # Ask for Accessibility up front so macOS lists the responsible app in System Settings.
+  ax_trusted || { ax_trusted 1; log "Accessibility not granted yet; prompted" }
+
+  # Create the Ghostty window first, then move both windows back to back so they
+  # land together rather than Finder first and Ghostty a second later.
+  ghostty_running || ghostty_launch || { restore_finder; exit 1 }
+  local gid
+  gid=$(ghostty_new_window "$folder" "FINDER_FOLLOW=1" "FINDER_FOLLOW_FILE=$FOLLOW_FILE" "FINDER_TERMINAL_STATE=$STATE_DIR")
+  [[ -n $gid ]] || { restore_finder; die "Ghostty refused to create a window (see $LOG)" }
+  print -r -- "$gid" > "$GID_FILE"
+  log "Ghostty window $gid created"
+
+  # Finder on top, Ghostty below
+  finder_set_bounds "$fid" "$left" "$top" $(( left + width )) $(( top + fh )) >/dev/null
+  local tile_rc=0
+  tile_ghostty "$gid" "$left" $(( top + fh )) "$width" "$th" || tile_rc=$?
+  if want_float; then
+    ghostty_toggle_float "$gid" && : > "$FLOAT_FILE"
+    log "panel floats above Stage Manager"
+  fi
+
+  # Watcher (single instance via pidfile)
+  nohup "$SELF" watch "$gid" >> "$LOG" 2>&1 < /dev/null &!
+  ghostty_activate_window "$gid"
+  if (( tile_rc == 2 )); then
+    print -u2 "finder-terminal: Accessibility permission missing; the Ghostty window was not placed. See README."
+    return 3
+  fi
+  return 0
+}
+
+do_close() {
+  stop_watcher
+  local gid; gid=$(saved_gid) || gid=""
+  if [[ -n $gid ]]; then
+    log "closing Ghostty window $gid"
+    ghostty_close_window "$gid"
+  fi
+  restore_finder
+  clear_state
+}
+
+do_toggle() {
+  if panel_open; then do_close; else do_open "${1:-}"; fi
+}
+
+do_status() {
+  local gid; gid=$(saved_gid) || gid=""
+  if [[ -n $gid ]] && ghostty_window_exists "$gid"; then
+    print "panel: open (Ghostty window $gid)"
+  else
+    print "panel: closed"
+  fi
+  if watcher_alive; then print "watcher: running (pid $(watcher_pid))"; else print "watcher: not running"; fi
+  print "stage manager: $(stage_manager_on && print on || print off); panel floating: $([[ -e $FLOAT_FILE ]] && print yes || print no)"
+  [[ -r $FWIN_FILE ]] && print "finder window (saved bounds): $(<$FWIN_FILE)"
+  print "finder front folder: $(finder_front_path 2>/dev/null || print '(none)')"
+  print "follow file: $FOLLOW_FILE -> $([[ -r $FOLLOW_FILE ]] && print -r -- "$(<$FOLLOW_FILE)" || print '(absent)')"
+  print "log: $LOG"
+}
+
+# Poll Finder; write the active tab's folder to $FOLLOW_FILE on change; exit when
+# the Ghostty window is gone (restoring Finder's bounds).
+do_watch() {
+  local gid=$1 last="" out ok p
+  [[ -n $gid ]] || die "watch: missing window id"
+  stop_watcher
+  print -r -- $$ > "$PID_FILE"
+  log "watcher started for Ghostty window $gid"
+  local manage_float=0 floating=1 front
+  [[ -e $FLOAT_FILE ]] && manage_float=1
+  local script='on run argv
+  set p to ""
+  try
+    tell application "Finder" to set p to POSIX path of ((target of front Finder window) as alias)
+  end try
+  set ok to false
+  if application "Ghostty" is running then
+    try
+      tell application "Ghostty" to set ok to exists (window id (item 1 of argv))
+    end try
+  end if
+  set fname to ""
+  try
+    tell application "System Events" to set fname to name of first application process whose frontmost is true
+  end try
+  return (ok as text) & linefeed & fname & linefeed & p
+end run'
+  while true; do
+    [[ -r $PID_FILE && $(<$PID_FILE) == $$ ]] || { log "watcher replaced; exiting"; exit 0 }
+    out=$(osa "$script" "$gid" 2>/dev/null) || out=""
+    ok=${out%%$'\n'*}; out=${out#*$'\n'}; front=${out%%$'\n'*}; p=${out#*$'\n'}
+    if [[ $ok != true ]]; then
+      log "Ghostty window $gid is gone; exiting"
+      restore_finder; clear_state; rm -f "$PID_FILE"
+      exit 0
+    fi
+    p=$(normalize_path "$p")
+    if [[ -n $p && -d $p && $p != $last ]]; then
+      write_follow "$p"; last=$p
+      log "finder -> $p"
+    fi
+    # Follow Stage Manager being switched on/off while the panel is open (FLOAT=auto).
+    if [[ $FLOAT == auto ]]; then
+      if stage_manager_on; then
+        if (( ! manage_float )); then manage_float=1; floating=0; log "Stage Manager on: managing float"; fi
+      elif (( manage_float )); then
+        (( floating )) && { ghostty_toggle_float "$gid"; floating=0 }
+        manage_float=0; rm -f "$FLOAT_FILE"; log "Stage Manager off: float dropped"
+      fi
+    fi
+    # Stage Manager: keep the floating panel only while Finder or Ghostty is in front;
+    # otherwise drop the float so Stage Manager parks it in the strip with Ghostty.
+    if (( manage_float )); then
+      case ${front:l} in
+        finder|ghostty)
+          if (( ! floating )); then ghostty_toggle_float "$gid"; floating=1; : > "$FLOAT_FILE"; log "panel shown (front=$front)"; fi ;;
+        "") ;;
+        *)
+          if (( floating )); then ghostty_toggle_float "$gid"; floating=0; rm -f "$FLOAT_FILE"; log "panel parked (front=$front)"; fi ;;
+      esac
+    fi
+    sleep $POLL
+  done
+}
+
+# ---------------------------------------------------------------- main
+
+# keep the log small
+if [[ -f $LOG ]] && (( $(stat -f %z "$LOG" 2>/dev/null || print 0) > 262144 )); then
+  tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"
+fi
+
+case ${1:-} in
+  toggle) do_toggle "${2:-}" ;;
+  open)   do_open "${2:-}" ;;
+  close)  do_close ;;
+  status) do_status ;;
+  watch)  do_watch "${2:-}" ;;
+  *) print -u2 "usage: finder-terminal toggle|open|close|status [folder]"; exit 2 ;;
+esac
