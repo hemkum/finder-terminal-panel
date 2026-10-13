@@ -14,8 +14,9 @@ zsh, with and without Stage Manager). Nothing else has been tried. If it breaks 
 your setup, open an issue with the output of `bin/finder-terminal status` and the
 tail of `~/.local/state/finder-terminal/log`.
 
-No dependencies: zsh, `osascript` (AppleScript / JXA), an Automator Quick Action and
-a small AppleScript helper app built locally with `osacompile`.
+No dependencies: zsh, `osascript` (AppleScript and JavaScript for Automation), an
+Automator Quick Action and a small AppleScript helper app built locally with
+`osacompile`.
 
 **Words used below.** The *panel* is the Ghostty window this tool opens under Finder.
 *Toggle* means run the action: it opens the panel, or closes it if it is open.
@@ -116,7 +117,8 @@ Stage Manager, so:
   stage with focus where you clicked;
 - when you switch to a third app, the watcher drops the float so Stage Manager parks
   the panel in the strip with Ghostty; when Finder (or Ghostty) comes back in front
-  the panel is floated and docked again.
+  the panel is floated and docked again. The watcher notices the app switch within
+  50 ms, so the panel moves together with Finder.
 
 Cross-app Stage Manager "sets" (drag a window out of the strip, or Shift-click it)
 have no scripting API, so they are not used. Force the behaviour with
@@ -128,7 +130,7 @@ have no scripting API, so they are not used. Force the behaviour with
 |---|---|---|
 | Quick Action | `services/Toggle Terminal Panel.workflow` | Automator "Run Shell Script" → `finder-terminal toggle "$@"`. The folder-input entry passes the right-clicked folder; the no-input entry passes nothing and the script falls back to the front Finder window (then Finder's insertion location, then `$HOME`). |
 | Launcher | `bin/finder-terminal` | Saves the front Finder window's id and bounds, picks the display under it (JXA `NSScreen.visibleFrame`, so the menu bar and Dock are excluded), sets Finder's bounds, creates the Ghostty window through Ghostty's AppleScript `new window with configuration` (initial working directory + environment variables, no second Ghostty instance), tiles it with System Events, starts the watcher. |
-| Watcher | `finder-terminal watch` | Background, one instance (pidfile). Every 0.5 s one `osascript` call reads the front Finder window's folder (each Finder tab is its own `Finder window`, and the front one is the active tab) and checks the Ghostty window still exists. Writes `~/.finder-follow` atomically only when the folder changes; windows without a real folder (Recents, search results, AirDrop, Trash) are ignored. When the Ghostty window is gone it restores Finder's bounds and exits. |
+| Watcher | `bin/finder-terminal-watch.js` | One long-running JXA process per panel (pidfile), started by the launcher. A 50 ms timer reads the frontmost app in-process (no spawns) and floats/parks the panel under Stage Manager. A 0.5 s timer reads the front Finder window's folder (each Finder tab is its own `Finder window`, and the front one is the active tab) and checks the Ghostty window still exists. Writes `~/.finder-follow` atomically only when the folder changes; windows without a real folder (Recents, search results, AirDrop, Trash) are ignored. When the Ghostty window is gone it calls the launcher's cleanup, which restores Finder's bounds. Idles at about 2 % of one core. |
 | Shell sync | `zsh/finder-follow.zsh` | `TMOUT=1` + `TRAPALRM` polls the file while the prompt is idle and `cd`s + `zle reset-prompt`. A `chpwd` hook sets the front Finder window's target. Loop guards: the shell only reacts to *changes* of the file, ignores the file for 1.5 s after its own push, and skips pushing a `cd` it just performed on Finder's behalf. |
 
 State lives in `~/.local/state/finder-terminal/` (`log`, `watcher.pid`,
@@ -139,7 +141,6 @@ State lives in `~/.local/state/finder-terminal/` (`log`, `watcher.pid`,
 | Variable | Default | Meaning |
 |---|---|---|
 | `FINDER_TERMINAL_SPLIT` | `0.6` | Finder's share of the screen height |
-| `FINDER_TERMINAL_POLL` | `0.5` | watcher period in seconds |
 | `FINDER_TERMINAL_FLOAT` | `auto` | `on`/`off`/`auto`: float the panel above Stage Manager (auto = only when Stage Manager is enabled) |
 | `FINDER_TERMINAL_GHOSTTY` | `/Applications/Ghostty.app` | Ghostty location |
 | `FINDER_TERMINAL_STATE` | `~/.local/state/finder-terminal` | state directory |

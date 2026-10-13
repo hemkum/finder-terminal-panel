@@ -5,7 +5,8 @@
 #   finder-terminal open   [folder]   open (or focus) the panel
 #   finder-terminal close             close the panel and restore Finder
 #   finder-terminal status            print state
-#   finder-terminal watch  <win-id>   (internal) Finder -> ~/.finder-follow poller
+#   finder-terminal-watch.js          (internal) background watcher, started by open
+#   (internal) finder-terminal-watch.js is the background watcher; `_cleanup` is its exit hook
 #
 # Dependency-free: zsh + osascript (AppleScript / JXA). See README.md.
 
@@ -14,12 +15,12 @@ setopt no_unset pipe_fail extended_glob
 zmodload zsh/datetime zsh/mathfunc
 
 typeset -g SELF=${${(%):-%x}:A}
+typeset -g WATCH_JS=${SELF:h}/finder-terminal-watch.js
 typeset -g STATE_DIR=${FINDER_TERMINAL_STATE:-$HOME/.local/state/finder-terminal}
 typeset -g FOLLOW_FILE=${FINDER_FOLLOW_FILE:-$HOME/.finder-follow}
 typeset -g GHOSTTY_APP=${FINDER_TERMINAL_GHOSTTY:-/Applications/Ghostty.app}
 [[ -d $GHOSTTY_APP ]] || [[ ! -d $HOME/Applications/Ghostty.app ]] || GHOSTTY_APP=$HOME/Applications/Ghostty.app
 typeset -gF SPLIT=${FINDER_TERMINAL_SPLIT:-0.6}     # Finder's share of the screen height
-typeset -gF POLL=${FINDER_TERMINAL_POLL:-0.5}       # watcher period, seconds
 typeset -g FLOAT=${FINDER_TERMINAL_FLOAT:-auto}      # auto|on|off: float the panel above Stage Manager
 typeset -g LOG=$STATE_DIR/log
 typeset -g PID_FILE=$STATE_DIR/watcher.pid
@@ -410,8 +411,10 @@ do_open() {
     log "panel floats above Stage Manager"
   fi
 
-  # Watcher (single instance via pidfile)
-  nohup "$SELF" watch "$gid" >> "$LOG" 2>&1 < /dev/null &!
+  # Watcher: one long-running JXA process (single instance via pidfile)
+  local managed=0; [[ -e $FLOAT_FILE ]] && managed=1
+  nohup osascript -l JavaScript "$WATCH_JS" "$gid" "$FOLLOW_FILE" "$STATE_DIR" "$LOG" "$SELF" "$managed" "$FLOAT" >> "$LOG" 2>&1 < /dev/null &!
+  print -r -- $! > "$PID_FILE"
   ghostty_activate_window "$gid"
   if (( tile_rc == 2 )); then
     print -u2 "finder-terminal: Accessibility permission missing; the Ghostty window was not placed. See README."
@@ -450,69 +453,12 @@ do_status() {
   print "log: $LOG"
 }
 
-# Poll Finder; write the active tab's folder to $FOLLOW_FILE on change; exit when
-# the Ghostty window is gone (restoring Finder's bounds).
-do_watch() {
-  local gid=$1 last="" out ok p
-  [[ -n $gid ]] || die "watch: missing window id"
-  stop_watcher
-  print -r -- $$ > "$PID_FILE"
-  log "watcher started for Ghostty window $gid"
-  local manage_float=0 floating=1 front
-  [[ -e $FLOAT_FILE ]] && manage_float=1
-  local script='on run argv
-  set p to ""
-  try
-    tell application "Finder" to set p to POSIX path of ((target of front Finder window) as alias)
-  end try
-  set ok to false
-  if application "Ghostty" is running then
-    try
-      tell application "Ghostty" to set ok to exists (window id (item 1 of argv))
-    end try
-  end if
-  set fname to ""
-  try
-    tell application "System Events" to set fname to name of first application process whose frontmost is true
-  end try
-  return (ok as text) & linefeed & fname & linefeed & p
-end run'
-  while true; do
-    [[ -r $PID_FILE && $(<$PID_FILE) == $$ ]] || { log "watcher replaced; exiting"; exit 0 }
-    out=$(osa "$script" "$gid" 2>/dev/null) || out=""
-    ok=${out%%$'\n'*}; out=${out#*$'\n'}; front=${out%%$'\n'*}; p=${out#*$'\n'}
-    if [[ $ok != true ]]; then
-      log "Ghostty window $gid is gone; exiting"
-      restore_finder; clear_state; rm -f "$PID_FILE"
-      exit 0
-    fi
-    p=$(normalize_path "$p")
-    if [[ -n $p && -d $p && $p != $last ]]; then
-      write_follow "$p"; last=$p
-      log "finder -> $p"
-    fi
-    # Follow Stage Manager being switched on/off while the panel is open (FLOAT=auto).
-    if [[ $FLOAT == auto ]]; then
-      if stage_manager_on; then
-        if (( ! manage_float )); then manage_float=1; floating=0; log "Stage Manager on: managing float"; fi
-      elif (( manage_float )); then
-        (( floating )) && { ghostty_toggle_float "$gid"; floating=0 }
-        manage_float=0; rm -f "$FLOAT_FILE"; log "Stage Manager off: float dropped"
-      fi
-    fi
-    # Stage Manager: keep the floating panel only while Finder or Ghostty is in front;
-    # otherwise drop the float so Stage Manager parks it in the strip with Ghostty.
-    if (( manage_float )); then
-      case ${front:l} in
-        finder|ghostty)
-          if (( ! floating )); then ghostty_toggle_float "$gid"; floating=1; : > "$FLOAT_FILE"; log "panel shown (front=$front)"; fi ;;
-        "") ;;
-        *)
-          if (( floating )); then ghostty_toggle_float "$gid"; floating=0; rm -f "$FLOAT_FILE"; log "panel parked (front=$front)"; fi ;;
-      esac
-    fi
-    sleep $POLL
-  done
+# Called by the watcher when the Ghostty window disappears (closed by hand, Ghostty quit).
+do_cleanup() {
+  local wpid=${1:-}
+  log "panel closed outside the tool; restoring Finder"
+  restore_finder; clear_state
+  [[ -z $wpid || $(watcher_pid 2>/dev/null) == $wpid ]] && rm -f "$PID_FILE"
 }
 
 # ---------------------------------------------------------------- main
@@ -527,6 +473,6 @@ case ${1:-} in
   open)   do_open "${2:-}" ;;
   close)  do_close ;;
   status) do_status ;;
-  watch)  do_watch "${2:-}" ;;
+  _cleanup) do_cleanup "${2:-}" ;;
   *) print -u2 "usage: finder-terminal toggle|open|close|status [folder]"; exit 2 ;;
 esac
