@@ -89,7 +89,25 @@ ObjC.registerSubclass({
       if (pid === null || parseInt(pid, 10) !== PID) { log('watcher replaced'); $.exit(0); }
       if (!panelAlive()) finish('Ghostty window ' + GID + ' is gone');
       const p = finderFolder();
-      if (p !== null && p !== lastFolder) { writeFile(FOLLOW_FILE, p); lastFolder = p; log('finder -> ' + p); }
+      if (p !== null && p !== lastFolder) {
+        writeFile(FOLLOW_FILE, p); lastFolder = p; log('finder -> ' + p);
+        // SIGALRM makes the panel shell pull now; only signal a zsh whose parent is Ghostty
+        // (a stale PID file must never hit a recycled PID).
+        const spid = parseInt(readFile(FOLLOW_FILE + '.pid') || '0', 10);
+        if (spid > 1) {
+          try {
+            const gh = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(GHOSTTY);
+            const gpid = gh.count > 0 ? gh.objectAtIndex(0).processIdentifier : -1;
+            const ps = shell.doShellScript('ps -o ppid=,comm= -p ' + spid + ' 2>/dev/null || true').trim().split(/\s+/);
+            let ok = ps.length >= 2 && ps[1].endsWith('zsh'), anc = parseInt(ps[0], 10);
+            for (let i = 0; ok && i < 3 && anc !== gpid; i++) {           // Ghostty starts the shell via login(1)
+              if (anc <= 1) { ok = false; break; }
+              anc = parseInt(shell.doShellScript('ps -o ppid= -p ' + anc + ' 2>/dev/null || echo 0').trim(), 10);
+            }
+            if (ok && anc === gpid) $.kill(spid, 14);
+          } catch (e) {}
+        }
+      }
       if (FLOAT_MODE === 'auto' && ticks % 4 === 0) {           // every 2 s: follow Stage Manager on/off
         const sm = stageManagerOn();
         if (sm && !manageFloat) { manageFloat = true; floating = false; lastFront = ''; log('Stage Manager on: managing float'); }

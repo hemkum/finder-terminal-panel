@@ -15,7 +15,8 @@ setopt no_unset pipe_fail extended_glob
 zmodload zsh/datetime zsh/mathfunc
 
 typeset -g SELF=${${(%):-%x}:A}
-typeset -g WATCH_JS=${SELF:h}/finder-terminal-watch.js
+typeset -g WATCH_JS=${SELF:h}/finder-terminal-watch.js      # fallback watcher (JXA, polling)
+typeset -g WATCH_BIN=${SELF:h}/finder-terminal-watch        # preferred watcher (Swift, event-driven), built by install.sh
 typeset -g STATE_DIR=${FINDER_TERMINAL_STATE:-$HOME/.local/state/finder-terminal}
 typeset -g FOLLOW_FILE=${FINDER_FOLLOW_FILE:-$HOME/.finder-follow}
 typeset -g GHOSTTY_APP=${FINDER_TERMINAL_GHOSTTY:-/Applications/Ghostty.app}
@@ -342,7 +343,7 @@ restore_finder() {
   rm -f "$FWIN_FILE"
 }
 
-clear_state() { rm -f "$GID_FILE" "$FWIN_FILE" "$FLOAT_FILE" }
+clear_state() { rm -f "$GID_FILE" "$FWIN_FILE" "$FLOAT_FILE" "$FOLLOW_FILE.pid" }
 
 # ---------------------------------------------------------------- commands
 
@@ -413,7 +414,11 @@ do_open() {
 
   # Watcher: one long-running JXA process (single instance via pidfile)
   local managed=0; [[ -e $FLOAT_FILE ]] && managed=1
-  nohup osascript -l JavaScript "$WATCH_JS" "$gid" "$FOLLOW_FILE" "$STATE_DIR" "$LOG" "$SELF" "$managed" "$FLOAT" >> "$LOG" 2>&1 < /dev/null &!
+  if [[ -x $WATCH_BIN ]]; then
+    nohup "$WATCH_BIN" "$gid" "$FOLLOW_FILE" "$STATE_DIR" "$LOG" "$SELF" "$managed" "$FLOAT" >> "$LOG" 2>&1 < /dev/null &!
+  else
+    nohup osascript -l JavaScript "$WATCH_JS" "$gid" "$FOLLOW_FILE" "$STATE_DIR" "$LOG" "$SELF" "$managed" "$FLOAT" >> "$LOG" 2>&1 < /dev/null &!
+  fi
   print -r -- $! > "$PID_FILE"
   ghostty_activate_window "$gid"
   if (( tile_rc == 2 )); then

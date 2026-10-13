@@ -53,6 +53,22 @@ else
   print "helper app up to date: $APP"
 fi
 
+# 1b. Event-driven watcher (optional, needs the Swift compiler from Xcode / Command Line Tools)
+WATCH_SRC="$HERE/src/finder-terminal-watch.swift"
+WATCH_BIN="$HERE/bin/finder-terminal-watch"
+if xcrun --find swiftc >/dev/null 2>&1; then
+  if [[ ! -x $WATCH_BIN || $WATCH_SRC -nt $WATCH_BIN ]]; then
+    print -n "building event-driven watcher with swiftc... "
+    if xcrun swiftc -O -o "$WATCH_BIN" "$WATCH_SRC" 2>"$HERE/bin/.swiftc.log"; then print "ok"; rm -f "$HERE/bin/.swiftc.log"
+    else print "failed (see bin/.swiftc.log); falling back to the JXA watcher"; rm -f "$WATCH_BIN"; fi
+  else
+    print "event-driven watcher up to date: $WATCH_BIN"
+  fi
+else
+  print "swiftc not found: using the polling JXA watcher (install Xcode Command Line Tools for the event-driven one)"
+  rm -f "$WATCH_BIN"
+fi
+
 # 2. Quick Action -----------------------------------------------------------
 xml_escape() { local s=$1; s=${s//\&/\&amp;}; s=${s//</\&lt;}; s=${s//>/\&gt;}; s=${s//\"/\&quot;}; print -r -- "$s"; }
 DEST="$SERVICES_DIR/${TEMPLATE:t}"

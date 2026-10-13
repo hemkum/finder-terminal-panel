@@ -105,6 +105,12 @@ if [[ -n $FF_INDICATOR ]]; then
   PROMPT="%(9v.${FF_INDICATOR}.)${PROMPT}"
 fi
 
+# Let the watcher nudge this shell with SIGALRM when Finder's folder changes, so the
+# pull happens immediately instead of on the next TMOUT tick.
+print -r -- $$ > "$FF_FILE.pid" 2>/dev/null
+ff_zshexit() { [[ -r $FF_FILE.pid && $(<$FF_FILE.pid) == $$ ]] && rm -f "$FF_FILE.pid" }
+add-zsh-hook zshexit ff_zshexit
+
 # Start in sync: treat whatever is in the file now as already seen.
 if [[ -r $FF_FILE ]]; then IFS= read -r FF_SEEN < "$FF_FILE" 2>/dev/null; FF_SEEN=${FF_SEEN%%/##}; fi
 FF_SYNCED=${PWD:A}

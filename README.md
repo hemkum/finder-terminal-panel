@@ -32,6 +32,8 @@ app switcher. *Activating* an app means bringing it to the front by any means
   in your Ghostty config.
 - zsh as your login shell (the panel shell is whatever Ghostty's `command` is;
   the sync code is zsh-only).
+- Optional: Xcode Command Line Tools (`xcode-select --install`) so `install.sh` can
+  compile the event-driven watcher. Without them a slower polling watcher is used.
 
 ## Install
 
@@ -39,8 +41,10 @@ app switcher. *Activating* an app means bringing it to the front by any means
 ./install.sh
 ```
 
-This does four things:
+This does five things:
 
+0. Compiles `src/finder-terminal-watch.swift` to `bin/finder-terminal-watch` if `swiftc`
+   is available (skipped otherwise, see Fallback watcher below).
 1. Builds the helper app `app/Finder Terminal.app` from `app/finder-terminal-applet.applescript`
    with `osacompile`. The Quick Action launches this app, and this app runs
    `bin/finder-terminal`. It exists only so macOS has a real app to grant
@@ -130,8 +134,9 @@ have no scripting API, so they are not used. Force the behaviour with
 |---|---|---|
 | Quick Action | `services/Toggle Terminal Panel.workflow` | Automator "Run Shell Script" → `finder-terminal toggle "$@"`. The folder-input entry passes the right-clicked folder; the no-input entry passes nothing and the script falls back to the front Finder window (then Finder's insertion location, then `$HOME`). |
 | Launcher | `bin/finder-terminal` | Saves the front Finder window's id and bounds, picks the display under it (JXA `NSScreen.visibleFrame`, so the menu bar and Dock are excluded), sets Finder's bounds, creates the Ghostty window through Ghostty's AppleScript `new window with configuration` (initial working directory + environment variables, no second Ghostty instance), tiles it with System Events, starts the watcher. |
-| Watcher | `bin/finder-terminal-watch.js` | One long-running JXA process per panel (pidfile), started by the launcher. A 50 ms timer reads the frontmost app in-process (no spawns) and floats/parks the panel under Stage Manager. A 0.5 s timer reads the front Finder window's folder (each Finder tab is its own `Finder window`, and the front one is the active tab) and checks the Ghostty window still exists. Writes `~/.finder-follow` atomically only when the folder changes; windows without a real folder (Recents, search results, AirDrop, Trash) are ignored. When the Ghostty window is gone it calls the launcher's cleanup, which restores Finder's bounds. Idles at about 2 % of one core. |
-| Shell sync | `zsh/finder-follow.zsh` | `TMOUT=1` + `TRAPALRM` polls the file while the prompt is idle and `cd`s + `zle reset-prompt`. A `chpwd` hook sets the front Finder window's target. Loop guards: the shell only reacts to *changes* of the file, ignores the file for 1.5 s after its own push, and skips pushing a `cd` it just performed on Finder's behalf. |
+| Watcher | `src/finder-terminal-watch.swift` → `bin/finder-terminal-watch` | One small event-driven process per panel (pidfile), started by the launcher. It reacts to macOS app-activation events (float/park under Stage Manager), to Finder's Accessibility events (reads the active tab's folder only when Finder changed something; each Finder tab is its own `Finder window`, and the front one is the active tab), and to the panel window being destroyed (restores Finder at once). A 2 s safety timer re-checks everything. Talks to Finder and Ghostty with raw Apple events, no script engine. Writes `~/.finder-follow` atomically only when the folder changes and sends the panel shell SIGALRM so it `cd`s immediately; windows without a real folder (Recents, search results, AirDrop, Trash) are ignored. Measured: 14 MB resident, under 0.1 % CPU idle, ~0.1 s from a Finder click to the shell's `cd`. Built by `install.sh` with `swiftc` (Xcode or Command Line Tools). |
+| Fallback watcher | `bin/finder-terminal-watch.js` | Used when `swiftc` is not installed. Same job in JavaScript for Automation, but polling: frontmost app every 50 ms, Finder every 0.5 s. About 27 MB and 4 % of one core while a panel is open. |
+| Shell sync | `zsh/finder-follow.zsh` | `TMOUT=1` + `TRAPALRM` reads the file while the prompt is idle (the watcher also sends SIGALRM right after writing it, so this is usually immediate) and `cd`s + `zle reset-prompt`. A `chpwd` hook sets the front Finder window's target. Loop guards: the shell only reacts to *changes* of the file, ignores the file for 1.5 s after its own push, and skips pushing a `cd` it just performed on Finder's behalf. |
 
 State lives in `~/.local/state/finder-terminal/` (`log`, `watcher.pid`,
 `ghostty-window`, `finder-window`). `status` prints it.
