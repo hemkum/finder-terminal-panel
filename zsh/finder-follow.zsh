@@ -90,7 +90,7 @@ ff() {
       print "finder-follow: on — $PWD" ;;
     "")
       local fp="(none)"; [[ -r $FF_FILE ]] && IFS= read -r fp < "$FF_FILE"
-      print "finder-follow: $(( FF_PAUSED )) && print -n paused || print -n on)"
+      print "finder-follow: $( (( FF_PAUSED )) && print -n paused || print -n on )"
       print "  shell:  $PWD"
       print "  finder: $fp"
       print "  file:   $FF_FILE" ;;
@@ -98,11 +98,15 @@ ff() {
   esac
 }
 
+# Panel-only customisation (a compact prompt, aliases, ...): sourced only in the panel shell.
+typeset -g FF_RC=${FINDER_FOLLOW_RC:-${XDG_CONFIG_HOME:-$HOME/.config}/finder-terminal/zshrc}
+[[ -r $FF_RC ]] && source "$FF_RC"
+
 # Prepend a paused marker to the prompt. Works with plain PROMPT strings; prompt
 # frameworks that rebuild PROMPT on every precmd (starship, p10k) will drop it —
 # use `ff` or $FF_PAUSED there. Set FINDER_FOLLOW_INDICATOR= to disable.
 if [[ -n $FF_INDICATOR ]]; then
-  PROMPT="%(9v.${FF_INDICATOR}.)${PROMPT}"
+  PROMPT="%(9V.${FF_INDICATOR}.)${PROMPT}"   # 9V: psvar[9] non-empty
 fi
 
 # Let the watcher nudge this shell with SIGALRM when Finder's folder changes, so the

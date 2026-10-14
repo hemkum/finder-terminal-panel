@@ -7,7 +7,11 @@ current folder. The shell follows Finder (folder navigation and tab switches) an
 Finder follows the shell (`cd`). Run the action again to close the panel and put
 Finder back where it was.
 
-![demo](docs/demo.gif)
+![Right-click a folder, toggle the panel, and Finder and the shell follow each other](docs/demo.gif)
+
+*Right-click a folder → Quick Actions → Toggle Terminal Panel. Navigating Finder (including
+switching Finder tabs) moves the shell, `cd` moves Finder, `ff off` / `ff on` pauses and
+resumes.*
 
 **Status:** works on the author's machine (macOS 26.7, Apple Silicon, Ghostty 1.3.1,
 zsh, with and without Stage Manager). Nothing else has been tried. If it breaks on
@@ -111,6 +115,11 @@ Command line: `bin/finder-terminal toggle|open|close|status [folder]`.
 
 ## Stage Manager
 
+![With Stage Manager, Finder and the panel leave and return together](docs/demo-stage-manager.gif)
+
+*Stage Manager: switching to another app parks Finder and the panel together; clicking
+Finder's thumbnail brings both back. Toggling again closes the panel and restores Finder.*
+
 Stage Manager shows one app's windows at a time and parks the others in the side
 strip, which would split Finder and the terminal. When Stage Manager is on (detected
 from `com.apple.WindowManager GloballyEnabled`), the panel is made float-on-top via
@@ -153,6 +162,7 @@ State lives in `~/.local/state/finder-terminal/` (`log`, `watcher.pid`,
 | `FINDER_FOLLOW_COOLDOWN` | `1.5` | seconds the shell ignores the file after pushing a `cd` to Finder |
 | `FINDER_FOLLOW_INDICATOR` | `%F{yellow}⏸ %f` | prompt prefix while paused; set to empty to disable |
 | `FINDER_FOLLOW_DEBUG` | unset | path of a file to log every pull/push |
+| `FINDER_FOLLOW_RC` | `~/.config/finder-terminal/zshrc` | zsh file sourced only in the panel shell, e.g. `PROMPT='%F{cyan}%~%f %# '` for a compact prompt |
 
 The Quick Action runs in Automator's XPC runner with a minimal environment (your
 shell's exports are not inherited), so to change `FINDER_TERMINAL_*` defaults edit the
