@@ -17,6 +17,10 @@ zmodload zsh/datetime zsh/mathfunc
 typeset -g SELF=${${(%):-%x}:A}
 typeset -g WATCH_JS=${SELF:h}/finder-terminal-watch.js      # fallback watcher (JXA, polling)
 typeset -g WATCH_BIN=${SELF:h}/finder-terminal-watch        # preferred watcher (Swift, event-driven), built by install.sh
+# Optional settings file (zsh syntax), e.g. FINDER_TERMINAL_SPLIT=0.5
+typeset -g CONFIG_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/finder-terminal/config
+[[ -r $CONFIG_FILE ]] && source "$CONFIG_FILE"
+
 typeset -g STATE_DIR=${FINDER_TERMINAL_STATE:-$HOME/.local/state/finder-terminal}
 typeset -g FOLLOW_FILE=${FINDER_FOLLOW_FILE:-$HOME/.finder-follow}
 typeset -g GHOSTTY_APP=${FINDER_TERMINAL_GHOSTTY:-/Applications/Ghostty.app}

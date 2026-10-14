@@ -37,4 +37,4 @@ rm -rf "$HERE/app/Finder Terminal.app" "$HERE/app/.built-for" "$HERE/bin/finder-
 rm -rf "$STATE_DIR"
 rm -f "$FOLLOW_FILE" "$FOLLOW_FILE.tmp"
 print "removed $STATE_DIR and $FOLLOW_FILE"
-print "Not touched: this folder, macOS permission grants (System Settings > Privacy & Security), any Services keyboard shortcut you assigned."
+print "Not touched: this folder, your settings in ${XDG_CONFIG_HOME:-$HOME/.config}/finder-terminal, macOS permission grants (System Settings > Privacy & Security), any Services keyboard shortcut you assigned."

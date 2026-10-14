@@ -11,3 +11,8 @@ app/.applet-build.applescript
 # local scratch
 *.mov
 !docs/*.mov
+
+# maintainer-private AI context and tools (see AGENTS.md)
+CLAUDE.local.md
+local/
+.claude/settings.local.json

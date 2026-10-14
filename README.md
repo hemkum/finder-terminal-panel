@@ -1,197 +1,119 @@
-# Finder terminal panel (Finder + Ghostty)
+# Finder Terminal Panel
 
-KDE Dolphin's F4 terminal panel, rebuilt for macOS with the stock Finder and
-[Ghostty](https://ghostty.org). One action tiles the front Finder window on the top
-60 % of its display and a Ghostty window on the bottom 40 %, opened in Finder's
-current folder. The shell follows Finder (folder navigation and tab switches) and
-Finder follows the shell (`cd`). Run the action again to close the panel and put
-Finder back where it was.
+KDE Dolphin's integrated terminal (the F4 panel), for macOS Finder and
+[Ghostty](https://ghostty.org). One toggle docks a terminal under Finder, and the two
+follow each other as you move between folders.
 
-![Right-click a folder, toggle the panel, and Finder and the shell follow each other](docs/demo.gif)
+![Finder with a terminal panel docked under it, both following each other](docs/demo.gif)
 
-*Right-click a folder → Quick Actions → Toggle Terminal Panel. Navigating Finder (including
-switching Finder tabs) moves the shell, `cd` moves Finder, `ff off` / `ff on` pauses and
-resumes.*
+*Right-click a folder → Quick Actions → Toggle Terminal Panel. Opening folders, going
+back and switching Finder tabs moves the shell. `cd` in the shell moves Finder.
+`ff off` pauses syncing and `ff on` resumes it.*
 
-**Status:** works on the author's machine (macOS 26.7, Apple Silicon, Ghostty 1.3.1,
-zsh, with and without Stage Manager). Nothing else has been tried. If it breaks on
-your setup, open an issue with the output of `bin/finder-terminal status` and the
-tail of `~/.local/state/finder-terminal/log`.
+Opening a terminal "here" is easy. Keeping it in the folder you're browsing, and tiled
+next to Finder, isn't. This does both.
 
-No dependencies: zsh, `osascript` (AppleScript and JavaScript for Automation), an
-Automator Quick Action and a small AppleScript helper app built locally with
-`osacompile`.
+## Features
 
-**Words used below.** The *panel* is the Ghostty window this tool opens under Finder.
-*Toggle* means run the action: it opens the panel, or closes it if it is open.
-*Stage Manager* is the macOS mode with the window strip on the left. *⌘-Tab* is the
-app switcher. *Activating* an app means bringing it to the front by any means
-(clicking one of its windows, its Dock icon, or ⌘-Tab).
+- **One toggle.** Finder takes the top 60 % of the screen and the terminal the bottom 40 %.
+  Toggle again to close the panel and put Finder back as it was.
+- **Finder → terminal.** Open a folder, go back or up, or switch Finder tabs, and the
+  shell follows. It never interrupts a running command.
+- **Terminal → Finder.** `cd` anywhere and Finder goes there too.
+- **Pause.** `ff off` stops syncing (⏸ shows in the prompt), `ff on` resumes.
+- **Stage Manager aware.** Finder and the panel leave the stage and come back together.
+- **Only the panel syncs.** Your other terminal windows are untouched.
+- **Light.** Built from zsh, AppleScript and a tiny event-driven helper
+  (about 14 MB, idle CPU near zero). Nothing runs while the panel is closed.
+
+![With Stage Manager, Finder and the panel leave and return together](docs/demo-stage-manager.gif)
+
+*With Stage Manager: switching to another app parks Finder and the panel together, and
+clicking Finder brings both back.*
 
 ## Requirements
 
-- macOS 14 or later is the assumption; only macOS 26.7 has actually been tested.
-- Ghostty 1.3 or later installed at `/Applications/Ghostty.app`. The launcher uses
-  Ghostty's AppleScript dictionary, so `macos-applescript` must not be set to `false`
-  in your Ghostty config.
-- zsh as your login shell (the panel shell is whatever Ghostty's `command` is;
-  the sync code is zsh-only).
-- Optional: Xcode Command Line Tools (`xcode-select --install`) so `install.sh` can
-  compile the event-driven watcher. Without them a slower polling watcher is used.
+- macOS 14 or later (tested on macOS 26)
+- [Ghostty](https://ghostty.org) 1.3 or later: `brew install --cask ghostty`
+- zsh (the macOS default shell)
+- Optional: Xcode Command Line Tools (`xcode-select --install`) for the low-overhead
+  helper. Without them a simpler polling helper is used.
 
 ## Install
 
 ```bash
-./install.sh
+git clone https://github.com/hemkum/finder-terminal-panel ~/.finder-terminal-panel
 ```
 
-This does five things:
+```bash
+~/.finder-terminal-panel/install.sh
+```
 
-0. Compiles `src/finder-terminal-watch.swift` to `bin/finder-terminal-watch` if `swiftc`
-   is available (skipped otherwise, see Fallback watcher below).
-1. Builds the helper app `app/Finder Terminal.app` from `app/finder-terminal-applet.applescript`
-   with `osacompile`. The Quick Action launches this app, and this app runs
-   `bin/finder-terminal`. It exists only so macOS has a real app to grant
-   Accessibility and Automation to: Quick Actions run inside Automator's hidden runner,
-   which cannot be granted Accessibility, so without the helper the Ghostty window
-   can't be placed and overlaps Finder.
-2. Writes the Quick Action `~/Library/Services/Toggle Terminal Panel.workflow`
-   (it points at the helper app in this folder, so don't move the folder; re-run
-   `install.sh` if you do).
-3. Asks before appending one line to `~/.zshrc` that sources `zsh/finder-follow.zsh`.
-   The snippet is inert unless the shell was started with `FINDER_FOLLOW=1`.
-4. Refreshes the Services registry.
+The installer adds a Finder Quick Action and asks before adding one line to `~/.zshrc`.
+Everything else stays in the cloned folder.
 
-Nothing is copied anywhere else. `./uninstall.sh` removes the Quick Action, the
-`~/.zshrc` line, `~/.finder-follow` and `~/.local/state/finder-terminal`.
+Then right-click any folder → **Quick Actions** → **Toggle Terminal Panel**. The first
+run asks for permissions for **Finder Terminal**. Allow them all and run it again.
 
-### Keyboard shortcut
+**Keyboard shortcut:** System Settings → Keyboard → Keyboard Shortcuts → Services →
+General → **Toggle Terminal Panel (Front Window)**.
 
-Two Quick Actions are installed from the same workflow:
+**Update:** `git -C ~/.finder-terminal-panel pull && ~/.finder-terminal-panel/install.sh`
 
-| Name | Where it shows up | Use |
-|---|---|---|
-| **Toggle Terminal Panel** | right-click a folder → Quick Actions | opens the panel in that folder |
-| **Toggle Terminal Panel (Front Window)** | Finder › Services menu, keyboard shortcut | uses the front window's folder; needs no selection |
-
-To bind a key: System Settings → Keyboard → Keyboard Shortcuts… → Services →
-General → *Toggle Terminal Panel (Front Window)* → click "none", press the keys
-(for example ⌃⌥T; F4 alone is usually taken by Spotlight). The shortcut works
-whenever Finder is the active app. If an action is missing from the Quick Actions
-submenu, enable it under Finder › Services › Services Settings… (or System Settings
-→ General → Login Items & Extensions → Finder).
-
-### Permissions macOS will ask for
-
-The first toggle triggers prompts for **Finder Terminal** (the helper app). If you run
-`bin/finder-terminal` by hand instead, the prompts name your terminal app. Allow each
-one, then run the action again.
-
-| Permission | Why |
-|---|---|
-| Automation → Finder | read the front window's folder, move/resize the window, set its folder from the shell |
-| Automation → Ghostty | create, find, focus and close the panel window |
-| Automation → System Events | place the Ghostty window (System Events does the Accessibility work) |
-| Accessibility | required for System Events to move/resize windows. The launcher asks for it on first use; if the Ghostty window still isn't placed, open System Settings → Privacy & Security → Accessibility and turn on "Finder Terminal" (the helper shows a dialog with an "Open Settings" button in that case) |
-
-The panel shell (Ghostty) also needs Automation → Finder the first time you `cd`.
-To re-trigger a prompt you declined: `tccutil reset AppleEvents` (Automation) or
-remove the app from the Accessibility list and run the action again.
+**Uninstall:** `~/.finder-terminal-panel/uninstall.sh`, then delete the folder.
 
 ## Use
 
-- Toggle from Finder (Quick Action or shortcut). The Ghostty window gets focus.
-- Navigate in Finder or switch Finder tabs → the shell `cd`s within about a second
-  (only while the prompt is idle, never while a command is running).
-- `cd` in the shell → the active Finder tab navigates there.
-- `ff` prints the sync state. `ff off` pauses both directions and shows `⏸` in the
-  prompt. `ff on` resumes and jumps to Finder's current folder.
-- Close: toggle again, or just close the Ghostty window. Finder's previous bounds are
-  restored either way.
-- Only the shell started by the panel syncs (`FINDER_FOLLOW=1`). Other Ghostty
-  windows, and tabs or splits you open inside the panel window, are untouched.
+| Action | What it does |
+|---|---|
+| Toggle Terminal Panel | Open the panel in the right-clicked folder, or close it |
+| Toggle Terminal Panel (Front Window) | Same, for the front Finder window (for the shortcut) |
+| `ff` | Show sync status |
+| `ff off` / `ff on` | Pause / resume syncing |
 
-Command line: `bin/finder-terminal toggle|open|close|status [folder]`.
+Closing the terminal window also restores Finder.
 
-## Stage Manager
+## Permissions
 
-![With Stage Manager, Finder and the panel leave and return together](docs/demo-stage-manager.gif)
+| Permission | Why |
+|---|---|
+| Automation → Finder | Read and set Finder's folder, size the window |
+| Automation → Ghostty | Open, find and close the panel |
+| Automation → System Events, Accessibility | Place the terminal window under Finder |
 
-*Stage Manager: switching to another app parks Finder and the panel together; clicking
-Finder's thumbnail brings both back. Toggling again closes the panel and restores Finder.*
+If the windows overlap after the first run, turn on **Finder Terminal** in System
+Settings → Privacy & Security → Accessibility.
 
-Stage Manager shows one app's windows at a time and parks the others in the side
-strip, which would split Finder and the terminal. When Stage Manager is on (detected
-from `com.apple.WindowManager GloballyEnabled`), the panel is made float-on-top via
-Ghostty's `toggle_window_float_on_top` action. Floating windows are not managed by
-Stage Manager, so:
+## Settings
 
-- the panel stays docked under Finder, and clicking either window keeps both on
-  stage with focus where you clicked;
-- when you switch to a third app, the watcher drops the float so Stage Manager parks
-  the panel in the strip with Ghostty; when Finder (or Ghostty) comes back in front
-  the panel is floated and docked again. The watcher notices the app switch within
-  50 ms, so the panel moves together with Finder.
+Optional files:
 
-Cross-app Stage Manager "sets" (drag a window out of the strip, or Shift-click it)
-have no scripting API, so they are not used. Force the behaviour with
-`FINDER_TERMINAL_FLOAT=on|off` (default `auto`).
+- `~/.config/finder-terminal/config`: `FINDER_TERMINAL_SPLIT=0.5` sets Finder's share of
+  the screen height (default 0.6). `FINDER_TERMINAL_FLOAT=on|off|auto` sets whether the
+  panel floats above Stage Manager (default `auto`).
+- `~/.config/finder-terminal/zshrc`: shell settings for the panel only, for example a
+  compact prompt: `PROMPT='%F{cyan}%~%f %# '`
 
 ## How it works
 
-| Piece | File | Notes |
-|---|---|---|
-| Quick Action | `services/Toggle Terminal Panel.workflow` | Automator "Run Shell Script" → `finder-terminal toggle "$@"`. The folder-input entry passes the right-clicked folder; the no-input entry passes nothing and the script falls back to the front Finder window (then Finder's insertion location, then `$HOME`). |
-| Launcher | `bin/finder-terminal` | Saves the front Finder window's id and bounds, picks the display under it (JXA `NSScreen.visibleFrame`, so the menu bar and Dock are excluded), sets Finder's bounds, creates the Ghostty window through Ghostty's AppleScript `new window with configuration` (initial working directory + environment variables, no second Ghostty instance), tiles it with System Events, starts the watcher. |
-| Watcher | `src/finder-terminal-watch.swift` → `bin/finder-terminal-watch` | One small event-driven process per panel (pidfile), started by the launcher. It reacts to macOS app-activation events (float/park under Stage Manager), to Finder's Accessibility events (reads the active tab's folder only when Finder changed something; each Finder tab is its own `Finder window`, and the front one is the active tab), and to the panel window being destroyed (restores Finder at once). A 2 s safety timer re-checks everything. Talks to Finder and Ghostty with raw Apple events, no script engine. Writes `~/.finder-follow` atomically only when the folder changes and sends the panel shell SIGALRM so it `cd`s immediately; windows without a real folder (Recents, search results, AirDrop, Trash) are ignored. Measured: 14 MB resident, under 0.1 % CPU idle, ~0.1 s from a Finder click to the shell's `cd`. Built by `install.sh` with `swiftc` (Xcode or Command Line Tools). |
-| Fallback watcher | `bin/finder-terminal-watch.js` | Used when `swiftc` is not installed. Same job in JavaScript for Automation, but polling: frontmost app every 50 ms, Finder every 0.5 s. About 27 MB and 4 % of one core while a panel is open. |
-| Shell sync | `zsh/finder-follow.zsh` | `TMOUT=1` + `TRAPALRM` reads the file while the prompt is idle (the watcher also sends SIGALRM right after writing it, so this is usually immediate) and `cd`s + `zle reset-prompt`. A `chpwd` hook sets the front Finder window's target. Loop guards: the shell only reacts to *changes* of the file, ignores the file for 1.5 s after its own push, and skips pushing a `cd` it just performed on Finder's behalf. |
+- A Quick Action launches a small helper app, which runs `bin/finder-terminal`. The
+  helper app exists so macOS has something to grant Accessibility to.
+- `bin/finder-terminal` saves Finder's window size and opens a Ghostty window through
+  Ghostty's AppleScript API (working directory plus `FINDER_FOLLOW=1`). It then tiles
+  both windows.
+- A watcher reacts to Finder's folder and tab changes and to app switches. It writes
+  the folder to `~/.finder-follow` and nudges the panel shell.
+- `zsh/finder-follow.zsh` runs only when `FINDER_FOLLOW=1`. It `cd`s when the file
+  changes and the prompt is idle, and tells Finder about your own `cd`s. Guards stop
+  the two sides from bouncing changes back and forth.
 
-State lives in `~/.local/state/finder-terminal/` (`log`, `watcher.pid`,
-`ghostty-window`, `finder-window`). `status` prints it.
+## Limits
 
-## Tuning (environment variables)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `FINDER_TERMINAL_SPLIT` | `0.6` | Finder's share of the screen height |
-| `FINDER_TERMINAL_FLOAT` | `auto` | `on`/`off`/`auto`: float the panel above Stage Manager (auto = only when Stage Manager is enabled) |
-| `FINDER_TERMINAL_GHOSTTY` | `/Applications/Ghostty.app` | Ghostty location |
-| `FINDER_TERMINAL_STATE` | `~/.local/state/finder-terminal` | state directory |
-| `FINDER_FOLLOW_FILE` | `~/.finder-follow` | path file shared by watcher and shell |
-| `FINDER_FOLLOW_COOLDOWN` | `1.5` | seconds the shell ignores the file after pushing a `cd` to Finder |
-| `FINDER_FOLLOW_INDICATOR` | `%F{yellow}⏸ %f` | prompt prefix while paused; set to empty to disable |
-| `FINDER_FOLLOW_DEBUG` | unset | path of a file to log every pull/push |
-| `FINDER_FOLLOW_RC` | `~/.config/finder-terminal/zshrc` | zsh file sourced only in the panel shell, e.g. `PROMPT='%F{cyan}%~%f %# '` for a compact prompt |
-
-The Quick Action runs in Automator's XPC runner with a minimal environment (your
-shell's exports are not inherited), so to change `FINDER_TERMINAL_*` defaults edit the
-top of `bin/finder-terminal`. The `FINDER_FOLLOW_*` ones are read by the panel shell
-and can go in `~/.zshrc`.
-
-## Known limits
-
-- The paused indicator is prepended to `PROMPT` once at load. Prompt frameworks that
-  rebuild `PROMPT` every command (starship, powerlevel10k) will drop it; use `ff` or
-  `$FF_PAUSED` in your own prompt instead.
-- Finder windows in full screen or macOS tiled layouts can't be resized by script.
-- Under Stage Manager the panel is a floating window. If you have *other* Ghostty
-  windows open and bring Ghostty to the front through the Dock icon or the ⌘-Tab app
-  switcher (instead of clicking inside the panel), Stage Manager shows those other
-  Ghostty windows and moves Finder into the strip. The panel itself stays where it
-  is; click Finder's thumbnail in the strip to get Finder back.
-- The panel is single-instance: toggling from a second Finder window re-focuses the
-  existing panel.
-- A `tmux` or nested `zsh` inside the panel inherits `FINDER_FOLLOW=1`, so every pane
-  follows Finder and any pane can push to it.
-
-## Later phases (not built)
-
-- Phase 2: keep Ghostty docked under Finder when the Finder window moves or resizes
-  (the watcher would track Finder's bounds and re-tile).
-- Phase 3: a Finder Sync extension so the toggle also appears when right-clicking
-  empty space.
+- Only Ghostty and zsh are supported.
+- Finder windows in full screen or in macOS window tiling can't be resized by script.
+- With Stage Manager, opening the panel briefly moves Finder to the side strip for
+  about half a second.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+[MIT](LICENSE)
